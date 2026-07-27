@@ -1,0 +1,12 @@
+# Explicit repo -> DataHub URN mapping.
+#
+# Why explicit rather than fuzzy matching: catalog URNs are namespaced
+# (b2fd91.order_entry_db.analytics.order_details) and dbt/Snowflake *siblings* mean
+# the same logical table is present under two platforms. Guessing produces a
+# confidently wrong blast radius, which is worse than admitting the table is unknown.
+#
+# Keys may be a bare table name or a schema-qualified name.
+datasets:
+  order_details: "urn:li:dataset:(urn:li:dataPlatform:snowflake,b2fd91.order_entry_db.analytics.order_details,PROD)"
+  analytics.order_details: "urn:li:dataset:(urn:li:dataPlatform:snowflake,b2fd91.order_entry_db.analytics.order_details,PROD)"
+  order_history: "urn:li:dataset:(urn:li:dataPlatform:dbt,b2fd91.ORDER_ENTRY_DB.analytics.order_history,PROD)"

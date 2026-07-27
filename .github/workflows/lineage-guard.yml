@@ -1,0 +1,89 @@
+name: lineage-guard
+
+# Reviews schema changes against DataHub lineage and posts the blast radius on the PR.
+#
+# This workflow runs in fixture-replay mode: GitHub Actions has no DataHub instance to
+# reach, so it replays lineage recorded from a real one. The comment is produced by the
+# same code path as a live run — it is generated, not checked in.
+#
+# For a real deployment, drop --fixture and set DATAHUB_GMS_URL / DATAHUB_GMS_TOKEN
+# secrets instead, then add --write-back to record findings in the catalog.
+
+on:
+  pull_request:
+    paths:
+      - "migrations/**"
+      - "models/**"
+      - "**/*.sql"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  impact-review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install lineage-guard
+        run: |
+          git clone --depth 1 https://github.com/luongs3/lineage-guard.git /tmp/lineage-guard
+          pip install -r /tmp/lineage-guard/requirements.txt
+
+      - name: Collect the schema change
+        id: collect
+        run: |
+          git diff origin/${{ github.base_ref }}...HEAD -- '**/*.sql' > /tmp/change.diff
+          # Prefer the raw DDL when the PR adds a migration file: it parses exactly,
+          # where a diff has to infer intent.
+          NEW_SQL=$(git diff --name-only --diff-filter=A origin/${{ github.base_ref }}...HEAD -- 'migrations/*.sql' | head -1)
+          if [ -n "$NEW_SQL" ]; then
+            echo "sql_file=$NEW_SQL" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Review against DataHub lineage
+        id: review
+        run: |
+          set +e
+          if [ -n "${{ steps.collect.outputs.sql_file }}" ]; then
+            python /tmp/lineage-guard/src/cli.py review \
+              --sql-file "${{ steps.collect.outputs.sql_file }}" \
+              --mapping mapping.yml \
+              --fixture /tmp/lineage-guard/fixtures/showcase-ecommerce.json \
+              --ui "${DATAHUB_UI_URL:-https://demo.datahub.com}" \
+              --comment-out /tmp/comment.md
+          else
+            python /tmp/lineage-guard/src/cli.py review \
+              --diff-file /tmp/change.diff \
+              --mapping mapping.yml \
+              --fixture /tmp/lineage-guard/fixtures/showcase-ecommerce.json \
+              --ui "${DATAHUB_UI_URL:-https://demo.datahub.com}" \
+              --comment-out /tmp/comment.md
+          fi
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Post the review
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('/tmp/comment.md', 'utf8');
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });
+
+      - name: Fail the check when the change is blocking
+        if: steps.review.outputs.exit_code != '0'
+        run: |
+          echo "::error::lineage-guard blocked this change — see the PR comment for the blast radius"
+          exit 1
